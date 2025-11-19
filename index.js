@@ -1,8 +1,15 @@
-require("dotenv").config(); // <-- must come first
+require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
 const OpenAI = require("openai");
+const { createClient } = require("@supabase/supabase-js");
+// 👇 Add this line:
+console.log("Supabase URL in API:", process.env.SUPABASE_URL);
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -13,8 +20,6 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 app.get("/health", (_, res) => res.json({ ok: true }));
-
-const PORT = process.env.PORT || 3000;
 
 // In-memory session store (swap to Redis/DB later)
 const sessions = {};
@@ -43,11 +48,12 @@ Never claim to be a therapist or attorney. Encourage professional help if needed
 
 app.post("/coach", async (req, res) => {
   try {
-       const { userId, message, profile, preferences, userName } = req.body;
+    const { userId, message, profile, preferences, userName } = req.body;
 
     if (!message || typeof message !== "string") {
       return res.status(400).json({ error: "Message is required." });
     }
+
     const displayName =
       userName && typeof userName === "string" && userName.trim().length > 0
         ? userName.trim()
@@ -58,14 +64,13 @@ app.post("/coach", async (req, res) => {
       sessions[key] = [];
     }
 
-    // Build conversation history
-   // const systemPrompt = buildSystemPrompt(profile, preferences);
-const baseSystemPrompt = buildSystemPrompt(profile, preferences);
+    // Build prompt
+    const baseSystemPrompt = buildSystemPrompt(profile, preferences);
 
-const systemPrompt = `
+    const systemPrompt = `
 The user's preferred name is "${displayName}".
 Always greet and refer to the user by this name at least once in each response.
-Do NOT call the user "friend" or "my friend" unless they explicitly ask for that. Use their name instead.
+Do NOT call the user "friend" or "my friend" unless they explicitly ask for that.
 
 ${baseSystemPrompt}
 `;
@@ -77,32 +82,44 @@ ${baseSystemPrompt}
       { role: "user", content: message },
     ];
 
-    // Call your model here (pseudo-code):
-    /*
+    // Call OpenAI
     const completion = await openai.chat.completions.create({
       model: "gpt-4.1-mini",
       messages: history,
       temperature: 0.8,
     });
 
-    const reply = completion.choices[0]?.message?.content?.trim() || "";
-    */
-
-    // For now, stub for testing:
-    const completion = await openai.chat.completions.create({
-  model: "gpt-4.1-mini", // or another model you prefer
-  messages: history,
-  temperature: 0.8,
-});
-
-const reply =
-  completion.choices?.[0]?.message?.content?.trim() ||
-  "I’m here with you. Can you say that one more time?";
+    const reply =
+      completion.choices?.[0]?.message?.content?.trim() ||
+      "I’m here with you. Can you say that one more time?";
 
     // Save to session
     sessions[key].push({ role: "user", content: message });
     sessions[key].push({ role: "assistant", content: reply });
 
+    // Save to Supabase
+    const userKey = userId || "anonymous";
+
+    const { error: insertError } = await supabase
+      .from("chat_messages")
+      .insert([
+        {
+          user_id: userKey,
+          role: "user",
+          content: message,
+        },
+        {
+          user_id: userKey,
+          role: "assistant",
+          content: reply,
+        },
+      ]);
+
+    if (insertError) {
+      console.error("Error saving chat messages to Supabase:", insertError);
+    }
+
+    // Reply to app
     return res.json({ reply });
   } catch (err) {
     console.error("Coach error:", err);
@@ -113,6 +130,7 @@ const reply =
   }
 });
 
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server listening on port ${PORT}`);
 });
